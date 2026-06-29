@@ -186,7 +186,7 @@ pfull <- ggplot(annual_full, aes(x = year, y = pct, fill = category)) +
   scale_x_continuous(breaks = seq(1997, 2025, by = 3)) +
   labs(
     title    = "Citations to Nancy Collins Johnson's full body of work",
-    subtitle = "Unique citing papers only (deduplicated across all 156 works)\nTrend line (lm) fitted to classifiable papers only (excludes grey bars)",
+    subtitle = "Papers citing multiple of her works counted only once per year\nTrend line (lm) fitted to classifiable papers only (excludes grey bars)",
     x        = "Year of citing paper",
     y        = "Proportion of citing papers",
     caption  = "Source: OpenAlex. Papers without title/abstract/keywords excluded from trend line."
@@ -197,10 +197,84 @@ ggsave(out_full, pfull, width = 10, height = 5.5, dpi = 300)
 message("Saved: ", out_full)
 
 # ---------------------------------------------------------------------------
-# 7. Console summary
+# 7. Significance testing
+#
+#    PRIMARY: logistic regression on individual papers (binary outcome).
+#      Each paper is a data point; year is the predictor.
+#      This is more rigorous than regressing annual proportions because it
+#      uses all observations, properly models the 0/1 outcome, and doesn't
+#      assume proportions are normally distributed.
+#      Only classifiable papers (those with abstracts or title/keyword matches)
+#      are included, same as the trend line.
+#
+#    SECONDARY: weighted linear regression on annual proportions.
+#      Weighted by n_classifiable per year. Matches what geom_smooth(method="lm")
+#      shows in the plots, so coefficients can be read directly off the figure.
 # ---------------------------------------------------------------------------
 
-cat("\n--- Trend summary (full corpus, classifiable papers only) ---\n")
+report_significance <- function(paper_df, trend_df, label) {
+
+  cat(sprintf("\n======================================================\n"))
+  cat(sprintf("  %s\n", label))
+  cat(sprintf("======================================================\n"))
+
+  # --- PRIMARY: logistic regression on individual papers ---
+  classifiable <- paper_df |>
+    filter(category != "No abstract (uncertain)") |>
+    mutate(match = as.integer(mycorrhiz_anywhere == TRUE))
+
+  glm_fit <- glm(match ~ year, data = classifiable, family = binomial)
+  glm_s   <- summary(glm_fit)
+  glm_cf  <- coef(glm_s)
+
+  log_or      <- glm_cf["year", "Estimate"]   # log-odds ratio per year
+  or_per_year <- exp(log_or)                   # odds ratio per year
+  or_per_dec  <- exp(log_or * 10)              # odds ratio per decade
+  glm_p       <- glm_cf["year", "Pr(>|z|)"]
+  n_papers    <- nrow(classifiable)
+
+  sig_label <- function(p) {
+    ifelse(p < 0.001, "***", ifelse(p < 0.01, "**", ifelse(p < 0.05, "*", "(not significant)")))
+  }
+
+  cat(sprintf("\nLogistic regression (individual papers, n = %d)\n", n_papers))
+  cat(sprintf("  Log-odds per year:      %+.4f\n", log_or))
+  cat(sprintf("  Odds ratio per year:     %.4f  (%.1f%% change per year)\n",
+              or_per_year, (or_per_year - 1) * 100))
+  cat(sprintf("  Odds ratio per decade:   %.4f  (%.1f%% change per decade)\n",
+              or_per_dec, (or_per_dec - 1) * 100))
+  cat(sprintf("  p-value:                 %.2e  %s\n", glm_p, sig_label(glm_p)))
+  cat(sprintf("  Interpretation:          A paper published one year later has\n"))
+  cat(sprintf("                           %.1f%% %s odds of mentioning mycorrhiz*\n",
+              abs((or_per_year - 1) * 100),
+              ifelse(log_or < 0, "lower", "higher")))
+
+  # --- SECONDARY: weighted lm on annual proportions (matches the plot) ---
+  lm_fit <- lm(pct_match ~ year, data = trend_df, weights = n_classifiable)
+  lm_s   <- summary(lm_fit)
+  lm_cf  <- coef(lm_s)
+
+  slope_yr  <- lm_cf["year", "Estimate"]
+  lm_p      <- lm_cf["year", "Pr(>|t|)"]
+  r2        <- lm_s$r.squared
+
+  cat(sprintf("\nWeighted linear regression on annual proportions (matches plot)\n"))
+  cat(sprintf("  Slope:                   %+.4f per year  (%+.1f%% per decade)\n",
+              slope_yr, slope_yr * 10 * 100))
+  cat(sprintf("  R²:                      %.3f\n", r2))
+  cat(sprintf("  p-value:                 %.2e  %s\n", lm_p, sig_label(lm_p)))
+
+  invisible(list(glm = glm_fit, lm = lm_fit))
+}
+
+fits_1997 <- report_significance(d1997,  trend_1997, "Johnson et al. 1997 paper")
+fits_full <- report_significance(dfull, trend_full,  "Nancy Collins Johnson full corpus")
+
+# ---------------------------------------------------------------------------
+# 8. Console summary (early vs. recent means)
+# ---------------------------------------------------------------------------
+
+cat("\n--- Mean mycorrhiz* rate by era (full corpus, classifiable papers only) ---\n")
 early  <- trend_full |> filter(year %in% 1997:2005) |> summarise(pct = mean(pct_match))
 recent <- trend_full |> filter(year %in% 2020:2025) |> summarise(pct = mean(pct_match))
 cat(sprintf("Mean mycorrhiz* rate 1997-2005:  %.1f%%\n", early$pct  * 100))
